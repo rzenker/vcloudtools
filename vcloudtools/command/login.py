@@ -32,6 +32,8 @@ def login(args):
     print("export {0}='{1}'".format(envkey('auth_token'), c.token))
 
 def main():
+    #logging.basicConfig()
+    #logging.getLogger().setLevel(logging.DEBUG)
     dispatch_command(login)
 
 if __name__ == '__main__':

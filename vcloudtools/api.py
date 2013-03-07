@@ -1,4 +1,5 @@
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import datetime
 from os import environ as env
 import json
@@ -7,7 +8,10 @@ import logging
 import lxml.etree
 import requests
 
-from vcloudtools.vcloud import Link, OrgList, Org
+
+#from vcloudtools.vcloud import Link, OrgList, Org, VcdElement
+#from vcloudtools.vcloud import VcdElement, OrigLink
+from vcloudtools.vcloud import OrigLink
 
 log = logging.getLogger(__name__)
 
@@ -27,8 +31,20 @@ class ClientError(Exception):
 class APIError(Exception):
     pass
 
+CONNECTIONS = []
+
+@contextmanager
+def vcd_connection(url, username, password, **kwargs):
+    """ return vcd connection and logout after """
+    vcd = VCloudAPIClient(url, **kwargs)
+    if not vcd.logged_in:
+        vcd.login(username, password)
+    yield vcd
+    vcd.logout()
+
 
 class VCloudAPIClient(object):
+
     def __init__(self, root=None):
         """
         Create a new instance of the vCloud API client, optionally specifying the API root URL
@@ -36,6 +52,8 @@ class VCloudAPIClient(object):
 
         self._session = requests.Session(headers={'accept': VCLOUD_MIME})
         self.token = envget('auth_token')
+
+        self._baseurls = []
 
         if root is not None:
             self.root = root
@@ -45,21 +63,32 @@ class VCloudAPIClient(object):
             msg = "No known API root for vCloud. Perhaps you need to set ${0}?".format(envkey('api_root'))
             raise ClientError(msg)
 
+        self.update_baseurls(root)
         self._links = None
 
         if self.logged_in:
             self._links = self._fetch_initial_links()
 
+        CONNECTIONS.append(self)
         log.debug("Created %s", self)
+
+    def update_baseurls(self, url):
+        from urlparse import urlparse
+        urlobj = urlparse(url)
+        baseurl = '{}://{}'.format(urlobj.scheme, urlobj.netloc)
+        if baseurl not in self._baseurls:
+            self._baseurls.append(baseurl) 
 
     def _req(self, method, url, _raise=True, *args, **kwargs):
         """
         Make and error check a request in the current session
         """
-        res = self._session.request(method, url, *args, **kwargs)
+        res = self._session.request(method, url, *args, verify=False, **kwargs)
         if _raise:
             _custom_raise_for_status(res)
         return res
+    # expose
+    req = _req
 
     def _url(self, path):
         """
@@ -100,6 +129,12 @@ class VCloudAPIClient(object):
         )
 
         self.token = res.headers[VCLOUD_AUTH_HEADER]
+        # need to initialize this if we login in same session
+        self._links = self._fetch_initial_links()
+
+    def logout(self):
+        res = self._req('delete', self._url('/session'))
+        CONNECTIONS.remove(self)
 
     def browse(self, path='/'):
         """
@@ -117,16 +152,29 @@ class VCloudAPIClient(object):
         etree = lxml.etree.fromstring(res.content)
         return _parse_org_list(etree)
 
+    @property
+    def orgs(self):
+        res = self._req('get', self._lookup('vcloud.orgList'))
+        #etree = lxml.etree.fromstring(res.content)
+        from vcloudtools.vcloud import parser
+        return lxml.etree.fromstring(res.content, parser)
+        #return VcdElement.frometree(self, etree)
+        for link in _orgs.links:
+            print link
+            res = self._req('get', org_short.href)
+
+
     def org(self, name):
         """
         Retrieve an org by name
         """
-        org_short = self.org_list().org_by_name(name)
+        #org_short = self.orgs[]name)
 
         res = self._req('get', org_short.href)
 
-        etree = lxml.etree.fromstring(res.content)
-        return _parse_org(etree)
+        return Org.fromrequest(self, res)
+        #etree = lxml.etree.fromstring(res.content)
+        #return _parse_org(etree)
 
     @property
     def token(self):
@@ -148,8 +196,6 @@ class VCloudAPIClient(object):
     def __str__(self):
         return '<VCloudAPIClient {0}>'.format(self.root)
 
-
-
 def envkey(key):
     return 'VCLOUD_{0}'.format(key.upper())
 
@@ -170,7 +216,7 @@ def _parse_links(el):
 
 
 def _parse_link(el):
-    return Link(**el.attrib)
+    return OrigLink(**el.attrib)
 
 
 def _parse_org_list(el):
@@ -208,6 +254,7 @@ def _custom_raise_for_status(res):
     try:
         res.raise_for_status()
     except requests.RequestException as err:
+        print res.content
         raise APIError(err)
 
 
