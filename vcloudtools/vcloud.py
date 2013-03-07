@@ -479,6 +479,7 @@ class ProductSectionList(VcdElement):
 class InstantiateVAppTemplateParams(VcdElement):
 
     powerOn = expose_attr('powerOn')
+    deploy = expose_attr('deploy')
 
     @property
     def networks(self):
@@ -494,7 +495,7 @@ class InstantiateVAppTemplateParams(VcdElement):
 
     @property
     def name(self):
-        return self.attrib.get('name')
+        return self.get('name')
 
     @name.setter
     def name(self, val):
@@ -513,15 +514,6 @@ class VApp(VcdElement):
     vms = fetch2dict('vcloud.vm', key='name')
     name = expose_attr('name')
 
-    def deploy(self):
-        link = self.links_by_rel['deploy']
-        res = request('post', link.href)
-        return fromstring(res.content)
-
-    def undeploy(self):
-        link = self.links_by_rel['undeploy']
-        res = request('post', link.href)
-        return fromstring(res.content)
 
     def powerOn(self):
         link = self.links_by_rel['power:powerOn']
@@ -538,8 +530,36 @@ class VApp(VcdElement):
         res = request('delete', link.href)
         return fromstring(res.content)
 
+    @property
+    def undeployed(self):
+        typ = fulltype('vcloud.undeployVAppParams')
+        try:
+            link = self.links_by_type[typ]
+            return False
+        except KeyError:
+            return True
+
+    def undeploy(self):
+        typ = fulltype('vcloud.undeployVAppParams')
+        link = self.links_by_type[typ]
+        dep = E('UndeployVAppParams')
+        print dep.xml
+        res = request('post', link.href, data=dep.xml)
+        print res.content
+        return fromstring(res.content)
+
 class Vm(VApp):
 
+
+    def deploy(self, powerOn="true", forceCustomization="true", deploymentLeaseSeconds="0"):
+        typ = fulltype('vcloud.deployVAppParams')
+        link = self.links_by_type[typ]
+        dep = E('DeployVAppParams', powerOn=powerOn, forceCustomization=forceCustomization,
+                deploymentLeaseSeconds=deploymentLeaseSeconds)
+        print dep.xml
+        res = request('post', link.href, data=dep.xml)
+        print res.content
+        return fromstring(res.content)
 
     def customize(self):
         top = self.one(nstag('GuestCustomizationSection'))

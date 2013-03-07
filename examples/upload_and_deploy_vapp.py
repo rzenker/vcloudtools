@@ -66,12 +66,15 @@ if __name__ == '__main__':
 
         print item.xml
 
-        if 0:
+        if 1:
             try:
                 vapp = vdc.vapps[VAPP_NAME]
             except:
                 pass
             else:
+                if not vapp.undeployed:
+                    vapp.undeploy().wait_for_task()
+                    vapp.refresh()
                 vapp.remove().wait_for_task()
                 vdc.refresh()
                 print 'tried remove'
@@ -79,6 +82,7 @@ if __name__ == '__main__':
         print vdc.vapps
         try:
             vapp = vdc.vapps[VAPP_NAME]
+            print 'found vapp'
         except KeyError:
             #print vapptmpl.xml
             params = vapptmpl.instantiateVAppTemplateParams(VAPP_NAME)
@@ -88,7 +92,7 @@ if __name__ == '__main__':
             vapp = vdc.instantiateVAppTemplate(params)
 
         print vapp.xml
-        print "Waiting for vApp to be deployed"
+        print "Waiting for vApp to be instantiated"
         if vapp.wait_for_all_tasks():
             vapp.refresh()
         else:
@@ -97,7 +101,8 @@ if __name__ == '__main__':
         # vm name inside of template is named the same
         vm = vapp.vms[TEMPLATE_NAME]
         print vm.xml
-        if 0:
+        if 1:
+            vm.undeploy().wait_for_task()
             custom = vm.customize()
             custom.AdminPasswordEnabled = "false"
             custom.ComputerName = VAPP_NAME
@@ -106,15 +111,26 @@ if __name__ == '__main__':
             print "waiting for customization task to complete"
             if task.wait_for_task():
                 vapp.refresh()
+                import time
+                time.sleep(2)
+                vm.refresh()
             else:
                 raise Exception('Update customization task failed')
 
-        print vapp.xml
-        if 0:
-            if vapp.powerOn().wait_for_task():
-                print 'vApp {} is online'.format(vapp.name)
+            print vm.xml
+            task = vm.deploy()
+            if task.wait_for_task():
+                vapp.refresh()
             else:
-                raise Exception('Power on task failed')
+                raise Exception('vm deploy task failed')
+
+        print vapp.xml
+        print 'vApp {} is online'.format(vapp.name)
+
+#        if 1:
+#            if vapp.powerOn().wait_for_task():
+#            else:
+#                raise Exception('Power on task failed')
 
 #        print vapptmpl.status   # 8 appears to be gtg offline, need to find the mapping of these in java reference most likely
         # 4 is gtg powered on
