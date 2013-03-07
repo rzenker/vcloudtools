@@ -135,6 +135,21 @@ def fetch2list(subtype):
         return matched
     return inner
 
+def fetch2dict_by_tag(tag, key):
+    @property
+    def inner(self):
+        matched = {}
+        for child in self.iter():
+            if child.tag == tag:
+                if child.href:
+                    res = request('get', child.href)
+                    top = fromstring(res.content)
+                else:
+                    top = child
+                matched[child.get(key)] = top
+        return matched
+    return inner
+
 def fulltype(subtype):
     return 'application/vnd.vmware.{0}+xml'.format(subtype)
 
