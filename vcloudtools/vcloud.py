@@ -64,7 +64,6 @@ def matchtags(name, single=False, inside=None):
     return inner
 
 def getelements(self, name, single=False, inside=None):
-    #matched = VcdElement(self._client, 'GenericList')
     matched = []
     for item in self:
         if item.tag == name:
@@ -78,31 +77,65 @@ def getelements(self, name, single=False, inside=None):
         raise ValueError('{} matched more than one element in message'.format(name))
     return matched
 
-def expose_tag_text(tag):
-    def get_inner_export_tag_text(self):
-        child = self.one(tag)
-        if child is None:
-            return None
-        return child.text
+def expose_tag_text(*tags, **kwargs):
+    """
+    return property to expose direct access to a child tag's text
+        *tags allows the default to be created at the right depth
+    """
 
-    def set_inner_export_tag_text(self, val):
-        child = self.one(tag)
+    default = kwargs.get('default')
+    insert = kwargs.get('insert')
+
+    def set_inner_expose_tag_text(self, val):
+        child = self.one(tags[-1])
         if child is None:
-            child = E(tag)
+            child = E(tags[-1])
+            last_element = self
+            for tag in tags[0:-1]:
+                element = self.one(tag)
+                if element is None:
+                    element = E(tag)
+                    last_element.append(element)
+                    last_element = element
+            if insert:
+                last_element.insert(insert, child)
+            else:
+                last_element.append(child)
         child.text = val
 
-    inner_export_tag_text = property(get_inner_export_tag_text, set_inner_export_tag_text)
+    def get_inner_expose_tag_text(self):
+        child = self.one(tags[-1])
+        if child is None:
+            if default is not None:
+                set_inner_expose_tag_text(self, default)
+            return default
+        return child.text
 
-    return inner_export_tag_text
 
-def expose_attr(attr):
-    def get_attr(self):
-        return self.attrib.get(attr)
+    inner_expose_tag_text = property(get_inner_expose_tag_text, set_inner_expose_tag_text)
+#    if default:
+#        inner_expose_tag_text.hasdefault = True
 
-    def set_attr(self, val):
-        self.attrib[attr] = val
+    return inner_expose_tag_text
 
-    attrprop = property(get_attr, set_attr)
+def expose_attr(attr, default=None):
+    "return a property to expose direct access to a tag attribute"
+    def set_inner_attr(self, val):
+        self.set(attr, val)
+
+    def get_inner_attr(self):
+        val = self.get(attr, default)
+        if val == default and default is not None:
+            # set it just in case so it's stored in the xml tree
+            set_inner_attr(self, val)
+        return val
+
+
+    attrprop = property(get_inner_attr, set_inner_attr)
+#    if default:
+#        print dir(attrprop)
+#        setattr(attrprop, 'hasdefault', True)
+#        attrprop.hasdefault = True
 
     return attrprop
 
@@ -132,6 +165,17 @@ def fetch2list(subtype):
                 res = request('get', child.href)
                 top = fromstring(res.content)
                 matched.append(top)
+        return matched
+    return inner
+
+def fetch2list_by_tag(tag):
+    @property
+    def inner(self):
+        matched = []
+        for child in self.iter():
+            if child.tag == tag:
+                child.refresh()
+                matched.append(child)
         return matched
     return inner
 
@@ -166,10 +210,12 @@ def returnchild(key, forceload=False):
     def inner(self, value):
         for child in self.iter():
             if child.attrib.get(key) == value:
-                if forceload or len(child) == 0:
-                    return fromstring(request('get', child.href).content)
-                else:
-                    return child
+                child.refresh()
+                return child
+#                if (forceload or len(child) == 0) and child.href:
+#                    return fromstring(request('get', child.href).content)
+#                else:
+#                    return child
         dict()[value]
     return inner
 
@@ -177,9 +223,14 @@ class VcdElement(etree.ElementBase):
 
     type = expose_attr('type')
 
-    def _setattrs(self, attrs):
-        for key, value in attrs.items():
-            setattr(self, key, value)
+    def _init_failtest(self):
+        print 'ENTERING _init'
+        for itemname in dir(self):
+            item = getattr(self, itemname)
+            print itemname, item.__class__
+            if isinstance(item, property):
+                print 'PROPERTY'
+                print item
 
     def refresh(self, usecache=False):
         if self.href:
@@ -380,21 +431,37 @@ class Vdc(VcdElement):
         res = request('post', self.links_by_type[fulltype(subtype)].href, data=params.xml)
         return fromstring(res.content)
 
-instantiate_vapp_params_xml = """
-<InstantiateVAppTemplateParams xmlns="http://www.vmware.com/vcloud/v1.5"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-    xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1"
-    name="Linux FTP server" deploy="true" powerOn="true">
-  <Description>Example FTP Server</Description>
-  <InstantiationParams>
-    <NetworkConfigSection>
-      <ovf:Info>Configuration parameters for logical networks</ovf:Info>
-    </NetworkConfigSection>
-  </InstantiationParams>
-  <Source href="https://vcloud.example.com/api/vAppTemplate/vappTemplate-111"/>
-  <AllEULAsAccepted>true</AllEULAsAccepted>
-</InstantiateVAppTemplateParams>
+network_connection_xml = """
+      <NetworkConnectionSection ovf:required="false">
+        <ovf:Info>Specifies the available VM network connections</ovf:Info>
+        <NetworkConnection network="SupportNet" needsCustomization="false">
+          <NetworkConnectionIndex>0</NetworkConnectionIndex>
+          <IpAddress>192.168.0.23</IpAddress>
+          <IsConnected>false</IsConnected>
+          <IpAddressAllocationMode>MANUAL</IpAddressAllocationMode>
+        </NetworkConnection>
+      </NetworkConnectionSection>
 """
+
+class NetworkConnection(VcdElement):
+
+    network = expose_attr('network')
+    needsCustomization = expose_attr('needsCustomization', default='false')
+    NetworkConnectionIndex = expose_tag_text(nstag('NetworkConnectionIndex'))
+    IpAddress = expose_tag_text(nstag('IpAddress'), insert=1)
+    IsConnected = expose_tag_text(nstag('IsConnected'), default='true')
+    IpAddressAllocationMode = expose_tag_text(nstag('IpAddressAllocationMode'), default='DHCP')
+
+    @classmethod
+    def new(cls, name, index=0, needsCustomization='false'):
+        net = E('NetworkConnection', network=name, needsCustomization=needsCustomization)
+        net.NetworkConnectionIndex = str(index)
+        # set the defaults for these attributes by calling them
+        # order of elements appears to be important...
+        net.IsConnected
+        net.IpAddressAllocationMode
+        return net
+
 network_config_xml = """
 <NetworkConfig networkName="vAppNetwork" xmlns="http://www.vmware.com/vcloud/v1.5">
   <Configuration>
@@ -415,14 +482,7 @@ class NetworkConfig(VcdElement):
         par = self.one(nstag('ParentNetwork'))
         par.href = val.href
 
-    @property
-    def fencemode(self):
-        pass
-
-    @fencemode.setter
-    def fencemode(self, val):
-        fm = self.one(nstag('FenceMode'))
-        fm.text = val
+    fencemode = expose_tag_text(nstag('Configuration'), nstag('FenceMode'), default='bridged')
 
     @property
     def name(self):
@@ -433,6 +493,106 @@ class NetworkConfig(VcdElement):
         top = fromstring(network_config_xml)
         top.attrib['networkName'] = name
         return top
+
+instantiate_vapp_params_xml = """
+<InstantiateVAppTemplateParams xmlns="http://www.vmware.com/vcloud/v1.5"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1"
+    name="Linux FTP server" deploy="true" powerOn="true">
+  <Description>Example FTP Server</Description>
+  <InstantiationParams>
+    <NetworkConfigSection>
+      <ovf:Info>Configuration parameters for logical networks</ovf:Info>
+    </NetworkConfigSection>
+  </InstantiationParams>
+  <Source href="https://vcloud.example.com/api/vAppTemplate/vappTemplate-111"/>
+  <AllEULAsAccepted>true</AllEULAsAccepted>
+</InstantiateVAppTemplateParams>
+"""
+
+class InstantiateVAppTemplateParams(VcdElement):
+
+    powerOn = expose_attr('powerOn')
+    deploy = expose_attr('deploy')
+
+    network_maps = fetch2dict_by_tag(nstag('NetworkConfig'), key='networkName')
+
+    def add_network(self, name, index=0, needsCustomization="false"):
+        # we can't configure that at instantiate time
+#        net = NetworkConnection.new(name, index=index, needsCustomization=needsCustomization)
+#        netsect = self.one(nstag('NetworkConnectionSection'))
+#        netsect.append(net)
+        netconfsec = self.one(nstag('NetworkConfigSection'))
+        netconfsec.append(NetworkConfig.new(name))
+        return netconfsec
+
+    def map_network(self, src, vcdnet, fencemode='bridged'):
+        self.network_maps[src].parent = vcdnet
+        self.network_maps[src].fencemode = fencemode
+
+    @property
+    def name(self):
+        return self.get('name')
+
+    @name.setter
+    def name(self, val):
+        self.attrib['name'] = val
+
+    @classmethod
+    def new(cls, name):
+        top = fromstring(instantiate_vapp_params_xml)
+        top.name = name
+        #top = E("InstantiateVAppTemplateParams", name=name, deploy='true', powerOn='true')
+        #top.append(E('Description'))
+        return top
+
+class VAppTemplate(VcdElement):
+
+    files = fetch2dict_by_tag(nstag('File'), key='name')
+    status = expose_attr('status')
+    name = expose_attr('name')
+    description = expose_tag_text('Description')
+
+
+    @property
+    def networks(self):
+        nets = []
+        for child in self.iter():
+            if child.tag == ovftag('Network'):
+                nets.append(child.attrib[ovftag('name')])
+        return nets
+
+    def instantiateVAppTemplateParams(self, name):
+        params = InstantiateVAppTemplateParams.new(name)
+        params.find(nstag('Source')).set('href', self.href)
+        #print self.xml
+        #print self.find(nstag('NetworkConfig'))
+        #netconfsec = params.find('.//{}'.format(nstag('NetworkConfigSection')))
+        #netconfsec.replace_child('NetworkConfig', self.find(nstag('NetworkConfig')))
+        #netconfsec = params.one(nstag('NetworkConfigSection'))
+        for index, netname in enumerate(self.networks):
+            params.add_network(netname, index)
+        return params
+
+    def wait_for_status(self, code):
+        code = str(code)
+        if self.status == code: return True
+        while 1:
+            self.refresh()
+            if self.status == code:
+                return True
+            time.sleep(1)
+
+    def wait_for_files(self):
+        if len(self.files) > 1 or self.status != 0: return True
+        while 1:
+            self.refresh()
+            if len(self.files) > 1:
+                # descriptor is uploaded and processed
+                return True
+            else:
+                time.sleep(1)
+
 
 #    type="application/vnd.vmware.vcloud.guestCustomizationSection+xml" href="" ovf:required="false">
 guest_customization_xml = """
@@ -476,39 +636,6 @@ class GuestCustomizationSection(VcdElement):
 class ProductSectionList(VcdElement):
     pass
 
-class InstantiateVAppTemplateParams(VcdElement):
-
-    powerOn = expose_attr('powerOn')
-    deploy = expose_attr('deploy')
-
-    @property
-    def networks(self):
-        nets = {}
-        for child in self.iter():
-            if child.tag == nstag('NetworkConfig'):
-                nets[child.name] = child
-        return nets
-
-    def map_network(self, src, vcdnet, fencemode='bridged'):
-        self.networks[src].parent = vcdnet
-        self.networks[src].fencemode = fencemode
-
-    @property
-    def name(self):
-        return self.get('name')
-
-    @name.setter
-    def name(self, val):
-        self.attrib['name'] = val
-
-    @classmethod
-    def new(cls, name):
-        top = fromstring(instantiate_vapp_params_xml)
-        top.name = name
-        #top = E("InstantiateVAppTemplateParams", name=name, deploy='true', powerOn='true')
-        #top.append(E('Description'))
-        return top
-
 class VApp(VcdElement):
 
     vms = fetch2dict('vcloud.vm', key='name')
@@ -526,7 +653,10 @@ class VApp(VcdElement):
         return fromstring(res.content)
 
     def remove(self):
-        link = self.links_by_rel['remove']
+        try:
+            link = self.links_by_rel['remove']
+        except KeyError:
+            raise Exception('{} is still deployed and cannot be removed'.format(self.name))
         res = request('delete', link.href)
         return fromstring(res.content)
 
@@ -550,6 +680,16 @@ class VApp(VcdElement):
 
 class Vm(VApp):
 
+    networks = fetch2list_by_tag(nstag('NetworkConnection'))
+
+    def update_section(self, sectname):
+        sect = self.one(nstag(sectname))
+        print sect.xml
+        res = request('put', sect.href, data=sect.xml)
+        return fromstring(res.content)
+
+    def update_networks(self):
+        return self.update_section('NetworkConnectionSection')
 
     def deploy(self, powerOn="true", forceCustomization="true", deploymentLeaseSeconds="0"):
         typ = fulltype('vcloud.deployVAppParams')
@@ -569,54 +709,6 @@ class Vm(VApp):
             instantparams.append(top)
         return top
 
-
-class VAppTemplate(VcdElement):
-
-    files = fetch2dict_by_tag(nstag('File'), key='name')
-    status = expose_attr('status')
-    name = expose_attr('name')
-    description = expose_tag_text('Description')
-
-
-    @property
-    def networks(self):
-        nets = []
-        for child in self.iter():
-            if child.tag == ovftag('Network'):
-                nets.append(child.attrib[ovftag('name')])
-        return nets
-
-    def instantiateVAppTemplateParams(self, name):
-        params = InstantiateVAppTemplateParams.new(name)
-        params.find(nstag('Source')).set('href', self.href)
-        print self.networks
-        #print self.xml
-        #print self.find(nstag('NetworkConfig'))
-        #netconfsec = params.find('.//{}'.format(nstag('NetworkConfigSection')))
-        #netconfsec.replace_child('NetworkConfig', self.find(nstag('NetworkConfig')))
-        netconfsec = params.one(nstag('NetworkConfigSection'))
-        for netname in self.networks:
-            netconfsec.append(NetworkConfig.new(netname))
-        return params
-
-    def wait_for_status(self, code):
-        code = str(code)
-        if self.status == code: return True
-        while 1:
-            self.refresh()
-            if self.status == code:
-                return True
-            time.sleep(1)
-
-    def wait_for_files(self):
-        if len(self.files) > 1 or self.status != 0: return True
-        while 1:
-            self.refresh()
-            if len(self.files) > 1:
-                # descriptor is uploaded and processed
-                return True
-            else:
-                time.sleep(1)
 
 
 class File(VcdElement):

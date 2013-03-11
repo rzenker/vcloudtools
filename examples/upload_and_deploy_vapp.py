@@ -45,9 +45,6 @@ if __name__ == '__main__':
 
         vapptmpl.wait_for_status(8)
 
-        print org.xml
-        print org.catalogs
-
         # need to verify template is in catalog before we can deploy it
         try:
             catalog = org.catalogs[CATALOG]
@@ -60,13 +57,10 @@ if __name__ == '__main__':
 
         try:
             item = catalog[TEMPLATE_NAME]
-            print 'GOT ITEM'
         except KeyError:
             item = catalog.add_vapp_template(vapptmpl)
 
-        print item.xml
-
-        if 1:
+        if 0:
             try:
                 vapp = vdc.vapps[VAPP_NAME]
             except:
@@ -80,15 +74,18 @@ if __name__ == '__main__':
                 print 'tried remove'
 
         print vdc.vapps
+        print vapptmpl.xml
         try:
             vapp = vdc.vapps[VAPP_NAME]
             print 'found vapp'
         except KeyError:
             #print vapptmpl.xml
             params = vapptmpl.instantiateVAppTemplateParams(VAPP_NAME)
+            print params.network_maps
+#            print params.networks
             params.map_network('VM Network', vdc.networks['engint'], fencemode='bridged')
             params.powerOn = "false"
-            #print params.xml
+            print params.xml
             vapp = vdc.instantiateVAppTemplate(params)
 
         print vapp.xml
@@ -100,9 +97,14 @@ if __name__ == '__main__':
 
         # vm name inside of template is named the same
         vm = vapp.vms[TEMPLATE_NAME]
-        print vm.xml
         if 1:
-            vm.undeploy().wait_for_task()
+            if not vm.undeployed:
+                vm.undeploy().wait_for_task()
+            print vm.xml
+            net = vm.networks[0]
+            net.IpAddressAllocationMode = 'STATIC'
+            net.IpAddress = '192.168.225.42'
+            vm.update_networks().wait_for_task()
             custom = vm.customize()
             custom.AdminPasswordEnabled = "false"
             custom.ComputerName = VAPP_NAME
