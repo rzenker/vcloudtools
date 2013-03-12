@@ -616,6 +616,7 @@ class GuestCustomizationSection(VcdElement):
     ChangeSid = expose_tag_text(nstag('ChangeSid'))
     JoinDomainEnabled = expose_tag_text(nstag('JoinDomainEnabled'))
     AdminPasswordEnabled = expose_tag_text(nstag('AdminPasswordEnabled'))
+    AdminPassword = expose_tag_text(nstag('AdminPassword'))
     AdminPasswordAuto = expose_tag_text(nstag('AdminPasswordAuto'))
     ResetPasswordRequired = expose_tag_text(nstag('ResetPasswordRequired'))
     ComputerName = expose_tag_text(nstag('ComputerName'))

@@ -3,6 +3,7 @@ log = logging.getLogger(__name__)
 
 import tarfile
 
+from vcloudtools.vcloud import fromstring
 
 class OVA(object):
 
@@ -18,9 +19,22 @@ class OVA(object):
                 stream.close()
                 return data
 
+    @property
+    def descriptor_etree(self):
+        return fromstring(self.descriptor)
+
     def streamfile(self, fname):
         stream = self.tar.extractfile(fname)
         return stream
+
+    @property
+    def networks(self):
+        networks = []
+        for element in self.descriptor.iter():
+            if element.tag == envelopetag('Network'):
+                networks.append(element.get(envelopetag('name')))
+        return networks
+
 
     def close(self):
         self.tar.close()
@@ -30,3 +44,9 @@ class OVA(object):
 
     def __exit__(self, typ, value, tb):
         self.close()
+
+def envelopetag(tag):
+    return '{{http://schemas.dmtf.org/ovf/envelope/1}}{}'.format(tag)
+
+def ovftag(tag):
+    return '{{http://www.vmware.com/schema/ovf}}{}'.format(tag)
