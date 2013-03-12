@@ -315,7 +315,7 @@ class VcdElement(etree.ElementBase):
     def wait_for_all_tasks(self):
         allgood = True
         for task in self.tasks:
-            print '{} is {}'.format(task.get('operationName'), task.status)
+            log.info('{} is {}'.format(task.get('operationName'), task.status))
             if not task.wait_for_task():
                 allgood = False
         return allgood
@@ -420,9 +420,7 @@ class Vdc(VcdElement):
         params = fromstring(upload_vapp_xml)
         params.set('name', name)
         params[0].text = desc
-        print params.xml
         res = request('post', link.href, _raise=True, headers={'Content-Type' : typ}, data=params.xml)
-        print res.content
         return fromstring(res.content)
 
     def instantiateVAppTemplate(self, params):
@@ -658,6 +656,15 @@ class VApp(VcdElement):
             raise Exception('{} is still deployed and cannot be removed'.format(self.name))
         res = request('delete', link.href)
         return fromstring(res.content)
+
+    @property
+    def deployed(self):
+        typ = fulltype('vcloud.deployVAppParams')
+        try:
+            link = self.links_by_type[typ]
+            return False
+        except KeyError:
+            return True
 
     @property
     def undeployed(self):
