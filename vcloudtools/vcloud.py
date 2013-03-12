@@ -1,3 +1,6 @@
+import logging
+log = logging.getLogger(__name__)
+
 from collections import namedtuple
 import lxml.etree as etree
 from lxml.builder import ElementMaker
@@ -375,8 +378,6 @@ class Catalog(VcdElement):
         ent.set('href', vapptmpl.href)
         item.append(ent)
         res = request('post', link.href, data=item.xml)
-        print "ADD"
-        print res.content
         return fromstring(res.content)
 
 class Org(VcdElement):
@@ -386,14 +387,12 @@ class Org(VcdElement):
 
     def create_catalog(self, name, desc=""):
         typ = fulltype('admin.catalog')
-        print self.links_by_type
         link = self.links_by_type[typ]
         catalog = E('AdminCatalog')
         catalog.set('name', name)
         catdesc = E('Description')
         catdesc.text = desc
         catalog.append(catdesc)
-        print catalog.xml
         res = request('post', link.href, data=catalog.xml)
         return fromstring(res.content)
 
@@ -584,7 +583,7 @@ class VAppTemplate(VcdElement):
             time.sleep(1)
 
     def wait_for_files(self):
-        if len(self.files) > 1 or self.status != 0: return True
+        if len(self.files) > 1 or self.status != '0': return True
         while 1:
             self.refresh()
             if len(self.files) > 1:
@@ -723,15 +722,14 @@ class File(VcdElement):
 
     def upload(self, stream_or_string):
         link = self.links_by_rel['upload:default']
-        print stream_or_string
         if isinstance(stream_or_string, basestring):
             size = len(stream_or_string)
         elif hasattr(stream_or_string, "read"):
             # duck check for stream
-            print dir(stream_or_string)
             stream_or_string.seek(0, 2)
             size = stream_or_string.tell()
             stream_or_string.seek(0, 0)
+        log.info('uploading {} size {}'.format(self.name, size))
         res = request('put', link.href, data=stream_or_string, headers={'Content-length':str(size)})
         print res.content
         #return fromstring(res.content)
