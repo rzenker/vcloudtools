@@ -133,8 +133,12 @@ class VCloudAPIClient(object):
         self._links = self._fetch_initial_links()
 
     def logout(self):
-        res = self._req('delete', self._url('/session'))
-        CONNECTIONS.remove(self)
+        log.warn('experimentally not logging out of session')
+        return
+        if self.logged_in:
+            log.info('Logging out of logged in session')
+            res = self._req('delete', self._url('/session'))
+            CONNECTIONS.remove(self)
 
     def browse(self, path='/'):
         """
