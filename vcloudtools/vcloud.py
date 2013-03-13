@@ -121,13 +121,32 @@ def expose_tag_text(*tags, **kwargs):
 
     return inner_expose_tag_text
 
-def expose_attr(attr, default=None):
-    "return a property to expose direct access to a tag attribute"
+def expose_attr(attr, default=None, ignorens=False):
+    """
+    return a property to expose direct access to a tag attribute
+
+    :param attr: name of attribute
+    :param default: optional default value to set attr to on access
+    :param ignorens: optionally ignore namespace prefix during compare
+    :returns: property to get/set attribute
+    """
+
+    def get_attr_key(self, attr):
+        for key in self.attrib:
+            if key == attr:
+                return key
+            if ignorens and stripns(key) == attr:
+                return key
+
     def set_inner_attr(self, val):
-        self.set(attr, val)
+        key = get_attr_key(self, attr)
+        self.set(key, val)
 
     def get_inner_attr(self):
-        val = self.get(attr, default)
+        key = get_attr_key(self, attr)
+        if key is None:
+            return None
+        val = self.get(key, default)
         if val == default and default is not None:
             # set it just in case so it's stored in the xml tree
             set_inner_attr(self, val)
@@ -224,7 +243,7 @@ def returnchild(key, forceload=False):
 
 class VcdElement(etree.ElementBase):
 
-    type = expose_attr('type')
+    type = expose_attr('type', ignorens=True)
 
     def _init_failtest(self):
         print 'ENTERING _init'
@@ -242,6 +261,7 @@ class VcdElement(etree.ElementBase):
             self.clear()
             self.text = new.text
             self.tail = new.tail
+            self.tag = new.tag
             for attr, val in new.items():
                 self.set(attr, val)
             for child in new:
@@ -249,7 +269,11 @@ class VcdElement(etree.ElementBase):
             return True
         return False
 
-    href = expose_attr('href')
+    href = expose_attr('href', ignorens=True)
+
+    def commit(self):
+        res = request('put', self.href, headers={'Content-type' : self.type}, data=self.xml)
+        return fromstring(res.content)
 
     def replace_child(self, tag, newchild):
         for child in self:
@@ -627,10 +651,6 @@ class GuestCustomizationSection(VcdElement):
         top = fromstring(guest_customization_xml)
         return top
 
-    def commit(self):
-        res = request('put', self.href, headers={'Content-type' : self.type}, data=self.xml)
-        return fromstring(res.content)
-
 class ProductSectionList(VcdElement):
     pass
 
@@ -640,15 +660,49 @@ class VApp(VcdElement):
     name = expose_attr('name')
 
 
+    @property
+    def poweredOn(self):
+        try:
+            self.links_by_rel['power:powerOff']
+            return True
+        except KeyError:
+            return False
+    powered_on = poweredOn
+
+    @property
+    def poweredOff(self):
+        try:
+            self.links_by_rel['power:powerOn']
+            return True
+        except KeyError:
+            return False
+    powered_off = poweredOff
+
     def powerOn(self):
         link = self.links_by_rel['power:powerOn']
         res = request('post', link.href)
-        return fromstring(res.content)
+        task = fromstring(res.content)
+        task.wait_for_task()
+        self.refresh()
+        return task
+    power_on = powerOn
 
     def powerOff(self):
         link = self.links_by_rel['power:powerOff']
         res = request('post', link.href)
-        return fromstring(res.content)
+        task = fromstring(res.content)
+        task.wait_for_task()
+        self.refresh()
+        return task
+    power_off = powerOff
+
+    def shutdown(self):
+        link = self.links_by_rel['power:shutdown']
+        res = request('post', link.href)
+        task = fromstring(res.content)
+        task.wait_for_task()
+        self.refresh()
+        return task
 
     def remove(self):
         try:
@@ -688,6 +742,48 @@ class VApp(VcdElement):
 class Vm(VApp):
 
     networks = fetch2list_by_tag(nstag('NetworkConnection'))
+
+    def get_hardware_item(self, name):
+        for element in self.iter():
+            if element.tag == ovftag('Item'):
+                if not element.get(nstag('href')):
+                    # not an element we care about atm
+                    continue
+                if element.get(nstag('href')).endswith(name):
+                    return element
+    @property
+    def num_cpus(self):
+        for sub in self.get_hardware_item('cpu'):
+            if sub.tag.endswith('VirtualQuantity'):
+                return int(sub.text)
+
+    @num_cpus.setter
+    def num_cpus(self, new_num_cpus):
+        new_num_cpus = str(new_num_cpus)
+        cpu_section = self.get_hardware_item('cpu')
+        # must refresh here to get a valid xml representation for commit
+        cpu_section.refresh()
+        for sub in cpu_section:
+            if sub.tag.endswith('VirtualQuantity'):
+                sub.text = new_num_cpus
+        cpu_section.commit().wait_for_task()
+
+    @property
+    def memory_mb(self):
+        for sub in self.get_hardware_item('memory'):
+            if sub.tag.endswith('VirtualQuantity'):
+                return int(sub.text)
+
+    @memory_mb.setter
+    def memory_mb(self, new_memory_mb):
+        new_memory_mb = str(new_memory_mb)
+        memory_section = self.get_hardware_item('memory')
+        # must refresh here to get a valid xml representation for commit
+        memory_section.refresh()
+        for sub in memory_section:
+            if sub.tag.endswith('VirtualQuantity'):
+                sub.text = new_memory_mb
+        memory_section.commit().wait_for_task()
 
     def update_section(self, sectname):
         sect = self.one(nstag(sectname))
