@@ -133,7 +133,7 @@ class VCloudAPIClient(object):
         self._links = self._fetch_initial_links()
 
     def logout(self):
-        log.warn('experimentally not logging out of session')
+        # do not logout as this appears to cause session problems
         return
         if self.logged_in:
             log.info('Logging out of logged in session')
@@ -258,7 +258,7 @@ def _custom_raise_for_status(res):
     try:
         res.raise_for_status()
     except requests.RequestException as err:
-        print res.content
+        log.error(res.content)
         raise APIError(err)
 
 

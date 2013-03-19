@@ -663,19 +663,19 @@ class VApp(VcdElement):
     @property
     def poweredOn(self):
         try:
-            self.links_by_rel['power:powerOff']
-            return True
-        except KeyError:
+            self.links_by_rel['power:powerOn']
             return False
+        except KeyError:
+            return True
     powered_on = poweredOn
 
     @property
     def poweredOff(self):
         try:
-            self.links_by_rel['power:powerOn']
-            return True
-        except KeyError:
+            self.links_by_rel['power:powerOff']
             return False
+        except KeyError:
+            return True
     powered_off = poweredOff
 
     def powerOn(self):
@@ -697,7 +697,11 @@ class VApp(VcdElement):
     power_off = powerOff
 
     def shutdown(self):
-        link = self.links_by_rel['power:shutdown']
+        try:
+            link = self.links_by_rel['power:shutdown']
+        except KeyError:
+            # already shutdown
+            return
         res = request('post', link.href)
         task = fromstring(res.content)
         task.wait_for_task()
@@ -734,10 +738,11 @@ class VApp(VcdElement):
         typ = fulltype('vcloud.undeployVAppParams')
         link = self.links_by_type[typ]
         dep = E('UndeployVAppParams')
-        print dep.xml
         res = request('post', link.href, data=dep.xml)
-        print res.content
-        return fromstring(res.content)
+        task = fromstring(res.content)
+        task.wait_for_task()
+        self.refresh()
+        return task
 
 class Vm(VApp):
 
