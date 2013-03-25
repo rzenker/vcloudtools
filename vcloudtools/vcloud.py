@@ -88,6 +88,7 @@ def expose_tag_text(*tags, **kwargs):
 
     default = kwargs.get('default')
     insert = kwargs.get('insert')
+    commit_on_set = kwargs.get('commit_on_set', False)
 
     def set_inner_expose_tag_text(self, val):
         child = self.one(tags[-1])
@@ -105,6 +106,8 @@ def expose_tag_text(*tags, **kwargs):
             else:
                 last_element.append(child)
         child.text = val
+        if commit_on_set:
+            self.commit(wait_for_task=True)
 
     def get_inner_expose_tag_text(self):
         child = self.one(tags[-1])
@@ -137,6 +140,7 @@ def expose_attr(attr, default=None, ignorens=False):
                 return key
             if ignorens and stripns(key) == attr:
                 return key
+        return attr
 
     def set_inner_attr(self, val):
         key = get_attr_key(self, attr)
@@ -245,6 +249,15 @@ class VcdElement(etree.ElementBase):
 
     type = expose_attr('type', ignorens=True)
 
+    @property
+    def metadata(self):
+        try:
+            mdlink = self.links_by_type[fulltype('vcloud.metadata')]
+        except KeyError:
+            # element has no metadata capability
+            return None
+        return fromstring(request('get', mdlink.href).content)
+
     def _init_failtest(self):
         print 'ENTERING _init'
         for itemname in dir(self):
@@ -271,9 +284,15 @@ class VcdElement(etree.ElementBase):
 
     href = expose_attr('href', ignorens=True)
 
-    def commit(self):
+    def commit(self, wait_for_task=False):
+        if self.href is None:
+            # noop
+            return None
         res = request('put', self.href, headers={'Content-type' : self.type}, data=self.xml)
-        return fromstring(res.content)
+        task = fromstring(res.content)
+        if wait_for_task:
+            task.wait_for_task()
+        return task
 
     def replace_child(self, tag, newchild):
         for child in self:
@@ -747,6 +766,7 @@ class VApp(VcdElement):
 class Vm(VApp):
 
     networks = fetch2list_by_tag(nstag('NetworkConnection'))
+    description = expose_tag_text(nstag('Description'), commit_on_set=True)
 
     def get_hardware_item(self, name):
         for element in self.iter():
@@ -817,7 +837,69 @@ class Vm(VApp):
             instantparams.append(top)
         return top
 
+class MetadataEntry(VcdElement):
 
+    key = expose_tag_text(nstag('Key'))
+
+    __value = expose_tag_text(nstag('Value'))
+
+    # custom code for Value because to set it we need a new tag: MetadataValue
+    @property
+    def value(self):
+        return self.__value
+
+    @value.setter
+    def value(self, newval):
+        self.__value = newval
+        if self.href is not None:
+            # only call the update if this is a existing entry
+            # (which we know because we have an href)
+            element = self.one(nstag('Value'))
+            top = E('MetadataValue')
+            top.append(element)
+            res = request('put', self.href, data=top.xml)
+            task = fromstring(res.content)
+            task.wait_for_task()
+
+class Metadata(VcdElement):
+
+    def _add(self, key, value):
+        "add key/value to metadata object"
+        # To add we post a Metadata object containing the new entry
+        element = E('MetadataEntry')
+        element.key = key
+        element.value = value
+        top = E('Metadata')
+        top.type = self.type
+        top.href = self.href
+        top.append(element)
+        res = request('post', self.href, headers={'Content-type' : top.type}, data=top.xml)
+        task = fromstring(res.content)
+        task.wait_for_task()
+        # once it is added, it should show up on self with a refresh
+        self.refresh()
+
+    @property
+    def entries(self):
+        return self.all(nstag('MetadataEntry'))
+
+    def __getitem__(self, key):
+        for entry in self.entries:
+            if entry.key == key:
+                return entry.value
+        # easy to raise exact version of dict KeyError
+        dict()[key]
+
+    def __setitem__(self, key, value):
+        found = False
+        for entry in self.entries:
+            if entry.key == key:
+                found = True
+                break
+        if found:
+            entry.value = value
+        else:
+            self._add(key, value)
 
 class File(VcdElement):
 
@@ -852,3 +934,6 @@ import inspect
 for k,v in vars().items():
     if inspect.isclass(v) and issubclass(v, VcdElement):
             namespace[k] = v
+
+
+
