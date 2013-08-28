@@ -8,6 +8,8 @@ import logging
 import lxml.etree
 import requests
 
+from vcloudtools.connections import CONNECTIONS
+
 
 #from vcloudtools.vcloud import Link, OrgList, Org, VcdElement
 #from vcloudtools.vcloud import VcdElement, OrigLink
@@ -31,8 +33,6 @@ class ClientError(Exception):
 class APIError(Exception):
     pass
 
-CONNECTIONS = []
-
 @contextmanager
 def vcd_connection(url, username, password, **kwargs):
     """ return vcd connection and logout after """
@@ -45,12 +45,14 @@ def vcd_connection(url, username, password, **kwargs):
 
 class VCloudAPIClient(object):
 
-    def __init__(self, root=None):
+    def __init__(self, root=None, username=None, password=None):
         """
         Create a new instance of the vCloud API client, optionally specifying the API root URL
         """
 
         self._session = requests.Session(headers={'accept': VCLOUD_MIME})
+        self._username = username
+        self._password = password
         self.token = envget('auth_token')
 
         self._baseurls = []
@@ -118,14 +120,16 @@ class VCloudAPIClient(object):
 
         return links
 
-    def login(self, username, password):
+    def login(self, username=None, password=None):
         """
         Retrieve an auth token from the vCloud API using a username and password
         """
+        if username: self._username = username
+        if password: self._password = password
         res = self._req(
             'post',
             self._url('/sessions'),
-            auth=(username, password),
+            auth=(self._username, self._password),
         )
 
         self.token = res.headers[VCLOUD_AUTH_HEADER]
@@ -157,15 +161,17 @@ class VCloudAPIClient(object):
         return _parse_org_list(etree)
 
     @property
+    def admin(self):
+        res = self._req('get', self._lookup('admin.vcloud'))
+        from vcloudtools.vcloud import parser
+        return lxml.etree.fromstring(res.content, parser)
+
+    @property
     def orgs(self):
         res = self._req('get', self._lookup('vcloud.orgList'))
         #etree = lxml.etree.fromstring(res.content)
         from vcloudtools.vcloud import parser
         return lxml.etree.fromstring(res.content, parser)
-        #return VcdElement.frometree(self, etree)
-        for link in _orgs.links:
-            print link
-            res = self._req('get', org_short.href)
 
 
     def org(self, name):
@@ -258,6 +264,7 @@ def _custom_raise_for_status(res):
     try:
         res.raise_for_status()
     except requests.RequestException as err:
+        log.error(res)
         log.error(res.content)
         raise APIError(err)
 

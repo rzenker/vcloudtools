@@ -9,6 +9,8 @@ import time
 
 from urlparse import urlparse
 
+from vcloudtools.connections import request
+
 parser = etree.XMLParser(remove_blank_text=True)
 Element = parser.makeelement
 
@@ -18,23 +20,6 @@ E = ElementMaker(namespace="http://www.vmware.com/vcloud/v1.5",
                      ovf='http://schemas.dmtf.org/ovf/envelope/1',
                  ),
                  makeelement=parser.makeelement)
-
-
-def request(method, url, _raise=True, *args, **kwargs):
-
-    from vcloudtools.api import CONNECTIONS
-    urlobj = urlparse(url)
-    baseurl = '{}://{}'.format(urlobj.scheme, urlobj.netloc)
-    client = None
-    for client in CONNECTIONS:
-        if baseurl in client._baseurls:
-            break
-
-    if not client:
-        raise Exception('active client not found for {}'.format(baseurl))
-
-    return client.req(method, url, _raise=_raise, *args, **kwargs)
-
 
 
 _Link = namedtuple('Link', 'type href rel name')
@@ -90,6 +75,13 @@ def expose_tag_text(*tags, **kwargs):
     insert = kwargs.get('insert')
     commit_on_set = kwargs.get('commit_on_set', False)
 
+    def get_element(self):
+        cur = self
+        for tag in tags:
+            element = cur.one(tag)
+            cur = element
+        return element
+
     def set_inner_expose_tag_text(self, val):
         child = self.one(tags[-1])
         if child is None:
@@ -110,7 +102,8 @@ def expose_tag_text(*tags, **kwargs):
             self.commit(wait_for_task=True)
 
     def get_inner_expose_tag_text(self):
-        child = self.one(tags[-1])
+        #child = self.one(tags[-1])
+        child = get_element(self)
         if child is None:
             if default is not None:
                 set_inner_expose_tag_text(self, default)
@@ -247,7 +240,15 @@ def returnchild(key, forceload=False):
 
 class VcdElement(etree.ElementBase):
 
+
     type = expose_attr('type', ignorens=True)
+    name = expose_attr('name')
+
+    @property
+    def baseurl(self):
+        urlobj = urlparse(self.href)
+        baseurl = '{}://{}'.format(urlobj.scheme, urlobj.netloc)
+        return baseurl
 
     @property
     def metadata(self):
@@ -266,6 +267,13 @@ class VcdElement(etree.ElementBase):
             if isinstance(item, property):
                 print 'PROPERTY'
                 print item
+
+    def query(self, **params):
+        params.setdefault('format', 'records')
+        query = "{}/api/query".format(self.baseurl)
+        headers = {'Accept' : 'application/*+xml;version=5.1' }
+        res = request('get', query, params=params, headers=headers)
+        return res
 
     def refresh(self, usecache=False):
         if self.href:
@@ -376,7 +384,7 @@ class Task(VcdElement):
             elif self.status != 'running':
                 return False
             self.refresh()
-            time.sleep(1)
+            time.sleep(5)
 
 
 class OrgList(VcdElement):
@@ -440,6 +448,511 @@ class Org(VcdElement):
         return fromstring(res.content)
 
 
+
+add_user_xml = """
+<User
+   xmlns="http://www.vmware.com/vcloud/v1.5"
+   name="" >
+   <FullName></FullName>
+   <EmailAddress>user@example.com</EmailAddress>
+   <IsEnabled>true</IsEnabled>
+   <Role
+      href="https://vcloud.example.com/api/admin/role/105" />
+   <Password></Password>
+   <GroupReferences />
+</User>
+"""
+
+add_vdc_xml = """
+<CreateVdcParams
+   name=""
+   xmlns="http://www.vmware.com/vcloud/v1.5">
+   <Description></Description>
+   <AllocationModel>AllocationVApp</AllocationModel>
+   <ComputeCapacity>
+      <Cpu>
+         <Units>MHz</Units>
+         <Allocated>0</Allocated>
+         <Limit>0</Limit>
+      </Cpu>
+      <Memory>
+         <Units>MB</Units>
+         <Allocated>0</Allocated>
+         <Limit>0</Limit>
+      </Memory>
+   </ComputeCapacity>
+   <NicQuota>0</NicQuota>
+   <NetworkQuota>1000</NetworkQuota>
+   <VdcStorageProfile>
+      <Enabled>true</Enabled>
+      <Units>MB</Units>
+      <Limit>0</Limit>
+      <Default>true</Default>
+      <ProviderVdcStorageProfile href="" />
+   </VdcStorageProfile>
+   <ResourceGuaranteedMemory>0</ResourceGuaranteedMemory>
+   <ResourceGuaranteedCpu>0</ResourceGuaranteedCpu>
+   <VCpuInMhz>1024</VCpuInMhz>
+   <IsThinProvision>false</IsThinProvision>
+   <NetworkPoolReference href=""/>
+   <ProviderVdcReference name="" href="" />
+   <UsesFastProvisioning>false</UsesFastProvisioning>
+</CreateVdcParams>
+"""
+
+class AdminOrg(VcdElement):
+    "Admin Org Object"
+
+    users = fetch2dict_by_tag(nstag('UserReference'), key='name')
+    vdcs = fetch2dict_by_tag(nstag('Vdc'), key='name')
+    networks = fetch2dict_by_tag(nstag('Network'), key='name')
+
+    def add_vdc(self, name, pvdc, storage_profile, network_pool):
+        typ = fulltype('admin.createVdcParams')
+        link = self.links_by_type[typ]
+        vdc = fromstring(add_vdc_xml)
+        vdc.set('name', name)
+        pvdcref = vdc.find(nstag('ProviderVdcReference'))
+        pvdcref.set('name', pvdc.name)
+        pvdcref.set('href', pvdc.href)
+        netpoolref = vdc.find(nstag('NetworkPoolReference'))
+        netpoolref.set('name', network_pool.name)
+        netpoolref.set('href', network_pool.href)
+        pvdcspref = vdc.one(nstag('ProviderVdcStorageProfile'))
+        pvdcspref.set('href', storage_profile.href)
+        print vdc.xml
+        res = request('post', link.href, data=vdc.xml)
+        return fromstring(res.content)
+
+    def add_user(self, username, password, role, full_name=None, email=None):
+        typ = fulltype('admin.user')
+        link = self.links_by_type[typ]
+        user = fromstring(add_user_xml)
+        user.set('name', username)
+        user.find(nstag('Password')).text = password
+        user.find(nstag('Role')).href = role.href
+        if full_name is not None:
+            user.find(nstag('FullName')).text = full_name
+        if email is not None:
+            user.find(nstag('EmailAddress')).text = email
+        res = request('post', link.href, data=user.xml)
+        return fromstring(res.content)
+
+add_org_xml = """
+<AdminOrg
+   xmlns="http://www.vmware.com/vcloud/v1.5"
+   name=""
+   type="application/vnd.vmware.admin.organization+xml">
+   <Description></Description>
+   <FullName></FullName>
+   <IsEnabled>true</IsEnabled>
+   <Settings>
+      <OrgGeneralSettings>
+         <CanPublishCatalogs>true</CanPublishCatalogs>
+         <DeployedVMQuota>0</DeployedVMQuota>
+         <StoredVmQuota>0</StoredVmQuota>
+         <UseServerBootSequence>false</UseServerBootSequence>
+         <DelayAfterPowerOnSeconds>0</DelayAfterPowerOnSeconds>
+      </OrgGeneralSettings>
+      <OrgLdapSettings>
+         <OrgLdapMode>SYSTEM</OrgLdapMode>
+         <CustomUsersOu />
+      </OrgLdapSettings>
+      <OrgEmailSettings>
+         <IsDefaultSmtpServer>true</IsDefaultSmtpServer>
+         <IsDefaultOrgEmail>true</IsDefaultOrgEmail>
+         <FromEmailAddress />
+         <DefaultSubjectPrefix />
+         <IsAlertEmailToAllAdmins>true</IsAlertEmailToAllAdmins>
+        </OrgEmailSettings>
+   </Settings>
+</AdminOrg>
+"""
+
+class VCloud(VcdElement):
+    "Main Admin Object"
+
+    orgs = fetch2dict_by_tag(nstag('OrganizationReference'), key='name')
+    roles = fetch2dict_by_tag(nstag('RoleReference'), key='name')
+    networks = fetch2dict_by_tag(nstag('Network'), key='name')
+    pvdcs = fetch2dict_by_tag(nstag('ProviderVdcReference'), key='name')
+
+    def add_organization(self, name, full_name, desc=None):
+        typ = fulltype('admin.organization')
+        link = self.links_by_type[typ]
+        org = fromstring(add_org_xml)
+        org.set('name', name)
+        org.find(nstag('FullName')).text = full_name
+        if desc is not None:
+            org.find(nstag('Description')).text = desc
+        res = request('post', link.href, data=org.xml)
+        return fromstring(res.content)
+
+
+    @property
+    def edge_gateways(self):
+        res = self.query(type='edgeGateway')
+        return fromstring(res.content).edge_gateway_records
+
+    @property
+    def storage_profiles(self):
+        res = self.query(type='providerVdcStorageProfile')
+        return fromstring(res.content).storage_profile_records
+
+    @property
+    def network_pools(self):
+        res = self.query(type='networkPool')
+        return fromstring(res.content).network_pool_records
+
+    @property
+    def vmw_external_networks(self):
+        res = self.query(type='vMWExternalNetwork')
+        print res.content
+        return fromstring(res.content).network_pool_records
+
+add_vse_xml = """
+<EdgeGateway
+   name=""
+   xmlns="http://www.vmware.com/vcloud/v1.5">
+   <Description></Description>
+   <Configuration>
+      <GatewayBackingConfig>compact</GatewayBackingConfig>
+      <GatewayInterfaces>
+      </GatewayInterfaces>
+      <HaEnabled>false</HaEnabled>
+      <UseDefaultRouteForDnsRelay>false</UseDefaultRouteForDnsRelay>
+   </Configuration>
+</EdgeGateway>
+"""
+
+vse_gw_xml = """
+ <GatewayInterface xmlns="http://www.vmware.com/vcloud/v1.5">
+    <Name></Name>
+    <DisplayName></DisplayName>
+    <Network href="" />
+    <InterfaceType>uplink</InterfaceType>
+    <SubnetParticipation>
+       <Gateway></Gateway>
+       <Netmask></Netmask>
+       <IpAddress></IpAddress>
+    </SubnetParticipation>
+    <UseForDefaultRoute>true</UseForDefaultRoute>
+ </GatewayInterface>
+"""
+
+org_net_xml = """
+<OrgVdcNetwork
+   name=""
+   xmlns="http://www.vmware.com/vcloud/v1.5">
+   <Description></Description>
+   <Configuration>
+      <IpScopes>
+         <IpScope>
+            <IsInherited>false</IsInherited>
+            <Gateway></Gateway>
+            <Netmask></Netmask>
+            <Dns1>8.8.8.8</Dns1>
+            <Dns2>8.8.4.4</Dns2>
+            <IsEnabled>true</IsEnabled>
+            <IpRanges>
+               <IpRange>
+                  <StartAddress></StartAddress>
+                  <EndAddress></EndAddress>
+               </IpRange>
+            </IpRanges>
+         </IpScope>
+      </IpScopes>
+      <FenceMode>natRouted</FenceMode>
+   </Configuration>
+   <EdgeGateway href="" />
+   <IsShared>false</IsShared>
+</OrgVdcNetwork>
+"""
+
+
+class AdminVdc(VcdElement):
+    storage_profiles = fetch2dict_by_tag(nstag('VdcStorageProfile'), key='name')
+    resource_guaranteed_memory = expose_tag_text(nstag('ResourceGuaranteedMemory'))
+    resource_guaranteed_cpu = expose_tag_text(nstag('ResourceGuaranteedCpu'))
+    vcpu_in_mhz = expose_tag_text(nstag('VCpuInMhz'))
+
+    def add_edge_gateway(self, name, extnet): #, orgnet):
+        href = "{}/edgeGateways".format(self.href)
+        vse = fromstring(add_vse_xml)
+        vse.set('name', name)
+        gwintfs = vse.one(nstag('GatewayInterfaces'))
+
+        extintf = fromstring(vse_gw_xml)
+        print extintf.xml
+        extintf.one(nstag('InterfaceType')).text = 'uplink'
+        extintf.one(nstag('Name')).text = extnet.name
+        extintf.one(nstag('DisplayName')).text = extnet.name
+        extintf.one(nstag('Gateway')).text = extnet.start_address
+        extintf.one(nstag('Netmask')).text = extnet.netmask
+        extintf.one(nstag('IpAddress')).text = extnet.start_address
+        extintf.one(nstag('Network')).set('href', extnet.href)
+
+#        orgintf = fromstring(vse_gw_xml)
+#        orgintf.one(nstag('InterfaceType')).text = 'internal'
+#        orgintf.one(nstag('Name')).text = orgnet.name
+#        orgintf.one(nstag('DisplayName')).text = orgnet.name
+#        orgintf.one(nstag('Gateway')).text = orgnet.start_address
+#        orgintf.one(nstag('Netmask')).text = orgnet.netmask
+#        orgintf.one(nstag('IpAddress')).text = orgnet.start_address
+#        orgintf.one(nstag('UseForDefaultRoute')).text = "false"
+#        gwinfts.append(orgintf)
+
+        gwintfs.append(extintf)
+        print vse.xml
+        res = request('post', href, data=vse.xml)
+        return fromstring(res.content)
+
+
+    def add_org_network(self, name, ip, netmask, start_address, end_address, edge):
+        typ = fulltype('vcloud.orgVdcNetwork')
+        link = self.links_by_type[typ]
+        orgnet = fromstring(org_net_xml)
+        orgnet.set('name', name)
+        orgnet.one(nstag('Gateway')).text = ip
+        orgnet.one(nstag('Netmask')).text = netmask
+        orgnet.one(nstag('StartAddress')).text = start_address
+        orgnet.one(nstag('EndAddress')).text = end_address
+        orgnet.one(nstag('EdgeGateway')).set('href', edge.href)
+        print orgnet.xml
+        res = request('post', link.href, data=orgnet.xml)
+        return fromstring(res.content)
+
+    def query(self, **params):
+        params.setdefault('format', 'records')
+        query = "{}/api/query".format(self.baseurl)
+        headers = {'Accept' : 'application/*+xml;version=5.1' }
+        res = request('get', query, params=params, headers=headers)
+        return res
+
+    @property
+    def edge_gateways(self):
+        res = self.query(type='edgeGateway') #, filter='vdc=={}'.format(self.href))
+        return fromstring(res.content).edge_gateway_records
+
+vse_services_xml = """
+<EdgeGatewayServiceConfiguration
+   xmlns="http://www.vmware.com/vcloud/v1.5">
+   <FirewallService>
+      <IsEnabled>true</IsEnabled>
+      <DefaultAction>allow</DefaultAction>
+      <LogDefaultAction>false</LogDefaultAction>
+   </FirewallService>
+      <NatService>
+        <IsEnabled>true</IsEnabled>
+        <NatRule>
+          <RuleType>SNAT</RuleType>
+          <IsEnabled>true</IsEnabled>
+          <Id>65537</Id>
+          <GatewayNatRule>
+            <Interface type="application/vnd.vmware.admin.network+xml" name="" href=""/>
+            <OriginalIp></OriginalIp>
+            <TranslatedIp></TranslatedIp>
+          </GatewayNatRule>
+        </NatRule>
+      </NatService>
+      <GatewayIpsecVpnService>
+        <IsEnabled>true</IsEnabled>
+        <Tunnel>
+          <Name>intp3v4</Name>
+          <Description/>
+          <IpsecVpnThirdPartyPeer>
+            <PeerId>64.20.105.30</PeerId>
+          </IpsecVpnThirdPartyPeer>
+          <PeerIpAddress>64.20.105.30</PeerIpAddress>
+          <PeerId>64.20.105.30</PeerId>
+          <LocalIpAddress>192.240.154.152</LocalIpAddress>
+          <LocalId></LocalId>
+          <LocalSubnet>
+            <Name></Name>
+            <Gateway></Gateway>
+            <Netmask></Netmask>
+          </LocalSubnet>
+          <PeerSubnet>
+            <Name>192.168.139.0/24</Name>
+            <Gateway>192.168.139.0</Gateway>
+            <Netmask>255.255.255.0</Netmask>
+          </PeerSubnet>
+          <SharedSecret></SharedSecret>
+          <SharedSecretEncrypted>false</SharedSecretEncrypted>
+          <EncryptionProtocol>AES256</EncryptionProtocol>
+          <Mtu>1500</Mtu>
+          <IsEnabled>true</IsEnabled>
+          <IsOperational>true</IsOperational>
+        </Tunnel>
+      </GatewayIpsecVpnService>
+</EdgeGatewayServiceConfiguration>
+"""
+
+add_tunnel_intpod_xml = """
+<Tunnel xmlns="http://www.vmware.com/vcloud/v1.5">
+  <Name></Name>
+  <Description/>
+  <IpsecVpnThirdPartyPeer>
+    <PeerId></PeerId>
+  </IpsecVpnThirdPartyPeer>
+  <PeerIpAddress></PeerIpAddress>
+  <PeerId></PeerId>
+  <LocalIpAddress>64.20.105.30</LocalIpAddress>
+  <LocalId>64.20.105.30</LocalId>
+  <LocalSubnet>
+    <Name>Perf-org-routed</Name>
+    <Gateway>192.168.139.1</Gateway>
+    <Netmask>255.255.255.0</Netmask>
+  </LocalSubnet>
+  <PeerSubnet>
+    <Name></Name>
+    <Gateway></Gateway>
+    <Netmask>255.255.255.0</Netmask>
+  </PeerSubnet>
+  <SharedSecret></SharedSecret>
+  <SharedSecretEncrypted>false</SharedSecretEncrypted>
+  <EncryptionProtocol>AES256</EncryptionProtocol>
+  <Mtu>1500</Mtu>
+  <IsEnabled>true</IsEnabled>
+  <IsOperational>true</IsOperational>
+</Tunnel>
+"""
+class EdgeGateway(VcdElement):
+    "edge gateway"
+
+    status = expose_attr('status')
+
+    @property
+    def tunnels(self):
+        tuns = {}
+        for tun in self.all(nstag('Tunnel')):
+            name = tun.find(nstag('Name')).text
+            tuns[name] = tun
+        return tuns
+
+    def add_tunnel_intpod(self, name, peer_ip, peer_network, secret):
+        services = self.one(nstag('EdgeGatewayServiceConfiguration'))
+        tun = fromstring(add_tunnel_intpod_xml)
+        tun.find(nstag('Name')).text = name
+        tun.find(nstag('SharedSecret')).text = secret
+        for peer_id in tun.all(nstag('PeerId')):
+            peer_id.text = peer_ip
+        tun.one(nstag('PeerIpAddress')).text = peer_ip
+        peersub = tun.one(nstag('PeerSubnet'))
+        peersub.one(nstag('Name')).text = "{}/24".format(peer_network)
+        peersub.one(nstag('Gateway')).text = peer_network
+
+        services.one(nstag('GatewayIpsecVpnService')).append(tun)
+        print services.xml
+        return self.update_services(services)
+
+    def update_services_perf(self, extnet, orgnet, vpn_peer_ip, orgcidr, vpn_secret):
+        typ = fulltype('admin.edgeGatewayServiceConfiguration')
+        link = self.links_by_type[typ]
+        orgnet = fromstring(org_net_xml)
+
+    def update_services(self, services):
+        typ = fulltype('admin.edgeGatewayServiceConfiguration')
+        link = self.links_by_type[typ]
+        res = request('post', link.href, data=services.xml)
+        return fromstring(res.content)
+
+
+class SubAllocation(VcdElement):
+    start_address = expose_tag_text(nstag('IpRanges'), nstag('IpRange'), nstag('StartAddress'))
+
+    #end_address = expose_tag_text(nstag('IpRanges'), nstag('IpRange'), nstag('EndAddress'))
+
+    @property
+    def end_address(self):
+        return self.one(nstag('EndAddress')) 
+
+    @end_address.setter
+    def end_address(self, val):
+        endaddr = self.end_address
+        if endaddr is None:
+            endaddr = E('EndAddress')
+            endaddr.text = val
+            ipr = self.one(nstag('IpRange'))
+            ipr.append(endaddr)
+        else:
+            endaddr.text = val
+
+sub_alloc_xml = '<SubAllocation xmlns="http://www.vmware.com/vcloud/v1.5" />'
+class ExternalNetwork(VcdElement):
+    name = expose_attr('name')
+    gateway = expose_tag_text(nstag('Gateway'))
+    netmask = expose_tag_text(nstag('Netmask'))
+    dns1 = expose_tag_text(nstag('Dns1'))
+    dns2 = expose_tag_text(nstag('Dns2'))
+
+    sub_allocations = fetch2list_by_tag(nstag('SubAllocation'))
+
+    def add_sub_allocation(self, vse, start_address, end_address=None):
+        #vmwextnet = self.vmwextnet
+        vmwextnet = self
+        suballocs = vmwextnet.one(nstag('SubAllocations'))
+        suballoc = fromstring(sub_alloc_xml)
+        edge = E('EdgeGateway', type=vse.type, name=vse.name, href=vse.href)
+        suballoc.append(edge)
+        suballoc.start_address = start_address
+        if end_address:
+            suballoc.end_address = end_address
+        else:
+            suballoc.end_address = start_address
+        suballocs.append(suballoc)
+        print vmwextnet.xml
+        href = self.vmwextnet_href
+        res = request('put', self.href, data=vmwextnet.xml)
+        vmwextnetret = fromstring(res.content)
+        task = vmwextnetret.one(nstag("Task"))
+        return task
+
+    @property
+    def vmwextnet_href(self):
+        return self.href.replace("network", "extension/externalnet")
+
+    @property
+    def vmwextnet(self):
+        href = self.vmwextnet_href
+        res = request('get', href)
+        return fromstring(res.content)
+
+    @property
+    def start_address(self):
+       return self.all(nstag('StartAddress'))[0].text
+
+    @property
+    def end_address(self):
+       return self.all(nstag('EndAddress'))[0].text
+    #start_address = expose_tag_text(nstag('IpScope'), nstag('IpRanges'), nstag('StartAddress'))
+    #stop_address = expose_tag_text(nstag('IpScope'), nstag('IpRanges'), nstag('StopAddress'))
+
+class OrgVdcNetwork(ExternalNetwork):
+    pass
+
+class QueryResultRecords(VcdElement):
+    edge_gateway_records = fetch2dict_by_tag(nstag('EdgeGatewayRecord'), key='name')
+    storage_profile_records = fetch2dict_by_tag(nstag('ProviderVdcStorageProfileRecord'), key='name')
+    network_pool_records = fetch2dict_by_tag(nstag('NetworkPoolRecord'), key='name')
+
+class ProviderVdc(VcdElement):
+    name = expose_attr('name')
+    networks = fetch2dict_by_tag(nstag('Network'), key='name')
+    network_pools = fetch2dict_by_tag(nstag('NetworkPoolReference'), key='name')
+    cpu_total = expose_tag_text(nstag('ComputeCapacity'), nstag('Cpu'), nstag('Total'))
+    memory_total = expose_tag_text(nstag('ComputeCapacity'), nstag('Memory'), nstag('Total'))
+    storage_total = expose_tag_text(nstag('StorageCapacity'), nstag('Total'))
+
+    @property
+    def storage_profiles(self):
+        exthref = self.href.replace("providervdc", "extension/providervdc")
+        #exthref = self.href
+        res = request('get', "{}/availableStorageProfiles".format(exthref))
+        return fromstring(res.content)
+
+
+
 upload_vapp_xml = """
 <UploadVAppTemplateParams
  name=""
@@ -455,6 +968,11 @@ class Vdc(VcdElement):
     vapp_templates = fetch2dict('vcloud.vAppTemplate', key='name')
     vapps = fetch2dict('vcloud.vApp', key='name')
     networks = fetch2dict('vcloud.network', key='name')
+
+    @property
+    def edge_gateways(self):
+        res = self.query(type='edgeGateway') #, filter='vdc=={}'.format(self.href))
+        return fromstring(res.content).edge_gateway_records
 
     def uploadVAppTemplate(self, name, desc):
         "returns a new vapp instance that allows you to upload"
@@ -659,7 +1177,7 @@ class GuestCustomizationSection(VcdElement):
     ChangeSid = expose_tag_text(nstag('ChangeSid'))
     JoinDomainEnabled = expose_tag_text(nstag('JoinDomainEnabled'))
     AdminPasswordEnabled = expose_tag_text(nstag('AdminPasswordEnabled'))
-    AdminPassword = expose_tag_text(nstag('AdminPassword'))
+    AdminPassword = expose_tag_text(nstag('AdminPassword'), insert=8)
     AdminPasswordAuto = expose_tag_text(nstag('AdminPasswordAuto'))
     ResetPasswordRequired = expose_tag_text(nstag('ResetPasswordRequired'))
     ComputerName = expose_tag_text(nstag('ComputerName'))
@@ -675,7 +1193,8 @@ class ProductSectionList(VcdElement):
 
 class VApp(VcdElement):
 
-    vms = fetch2dict('vcloud.vm', key='name')
+    #vms = fetch2dict('vcloud.vm', key='name')
+    vms = fetch2dict_by_tag(nstag('Vm'), key='name')
     name = expose_attr('name')
 
 
@@ -934,6 +1453,3 @@ import inspect
 for k,v in vars().items():
     if inspect.isclass(v) and issubclass(v, VcdElement):
             namespace[k] = v
-
-
-
